@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openLCA Report Generator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+<!--
+  openLCA Report Generator (standalone, offline)
+  Creates the Excel documentation (1_Main Processes, 2_Sub-Process Details,
+  3_ecoinvent Datasets) for a product system via the openLCA IPC server.
+  Same logic as generate_doc.py. No external libraries, no internet needed.
+-->
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-2: #f0f3f6;
+    --border: #d9dee4;
+    --text: #1d2530;
+    --muted: #5d6875;
+    --accent: #1f7a4d;
+    --accent-hover: #186240;
+    --accent-soft: #e3f2ea;
+    --danger: #b3261e;
+    --danger-soft: #fbe9e7;
+    --selected: #d7ebe0;
+    --log-bg: #1e242b;
+    --log-text: #d6dde5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #13171c;
+      --surface: #1b2027;
+      --surface-2: #232a33;
+      --border: #333c47;
+      --text: #e4e9ee;
+      --muted: #9aa5b1;
+      --accent: #3fae78;
+      --accent-hover: #52c08a;
+      --accent-soft: #1d3a2c;
+      --danger: #f2877e;
+      --danger-soft: #3a2220;
+      --selected: #24453a;
+      --log-bg: #0e1115;
+      --log-text: #c9d1da;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #13171c; --surface: #1b2027; --surface-2: #232a33; --border: #333c47;
+    --text: #e4e9ee; --muted: #9aa5b1; --accent: #3fae78; --accent-hover: #52c08a;
+    --accent-soft: #1d3a2c; --danger: #f2877e; --danger-soft: #3a2220; --selected: #24453a;
+    --log-bg: #0e1115; --log-text: #c9d1da;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 40px; }
+  header h1 { font-size: 20px; margin: 0 0 2px; }
+  header p { margin: 0 0 16px; color: var(--muted); }
+  section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  label { color: var(--muted); }
+  input[type=text], input[type=number] {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; font: inherit; min-width: 0;
+  }
+  input:focus-visible, button:focus-visible, li:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #host { width: 150px; } #port { width: 90px; }
+  #search { flex: 1 1 240px; }
+  button {
+    font: inherit; border-radius: 6px; padding: 7px 14px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { color: var(--muted); }
+  .status.ok { color: var(--accent); }
+  .status.err { color: var(--danger); }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+  ul#list {
+    list-style: none; margin: 10px 0 0; padding: 0; max-height: 300px; overflow: auto;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2);
+  }
+  ul#list li {
+    padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; gap: 12px;
+  }
+  ul#list li:last-child { border-bottom: 0; }
+  ul#list li:hover { background: var(--accent-soft); }
+  ul#list li.sel { background: var(--selected); font-weight: 600; }
+  ul#list li .cat { color: var(--muted); font-weight: 400; font-size: 12.5px; text-align: right; overflow-wrap: anywhere; }
+  ul#list li.empty { cursor: default; color: var(--muted); }
+  .count { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+  .ps-wrap { display: none; }
+  .ps-wrap.on { display: block; }
+  .ps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 4px 16px; margin: 8px 0 0; }
+  .ps-grid label {
+    display: flex; align-items: baseline; gap: 6px; padding: 4px 6px; border-radius: 4px;
+    cursor: pointer; color: var(--text); font-size: 13px; line-height: 1.4;
+  }
+  .ps-grid label:hover { background: var(--accent-soft); }
+  .ps-grid label.baseline { font-weight: 600; }
+  .ps-grid label .badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 1px 5px;
+    white-space: nowrap;
+  }
+  .ps-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .ps-actions button { font-size: 12.5px; padding: 3px 10px; }
+  .progress { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; flex: 1 1 160px; visibility: hidden; }
+  .progress.on { visibility: visible; }
+  .progress::after {
+    content: ""; display: block; height: 100%; width: 35%; background: var(--accent);
+    animation: slide 1.1s ease-in-out infinite;
+  }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  #phase { color: var(--muted); font-size: 12.5px; min-height: 1.4em; margin-top: 6px; }
+  #result { display: none; }
+  #result.on { display: block; }
+  #result.error { background: var(--danger-soft); border-color: var(--danger); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
+  .stat { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+  dl { margin: 6px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; }
+  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+  details summary { cursor: pointer; color: var(--muted); }
+  pre#log {
+    background: var(--log-bg); color: var(--log-text); border-radius: 6px; padding: 10px;
+    max-height: 240px; overflow: auto; font: 12px/1.4 Consolas, monospace; white-space: pre-wrap; margin: 8px 0 0;
+  }
+  @media (max-width: 560px) {
+    ul#list li { flex-direction: column; gap: 2px; }
+    ul#list li .cat { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>openLCA Report Generator</h1>
+    <p>Erstellt die Excel-Dokumentation (Hauptprozesse, Sub-Prozesse, ecoinvent-Datensätze) für ein Product System.</p>
+  </header>
+
+  <section>
+    <h2>1 · Verbindung</h2>
+    <div class="row">
+      <label for="host">Host</label><input id="host" type="text" value="localhost">
+      <label for="port">Port</label><input id="port" type="number" value="8080" min="1" max="65535">
+      <button id="connect">Verbinden</button>
+      <span id="connStatus" class="status">Nicht verbunden</span>
+    </div>
+    <p class="hint">In openLCA: Datenbank öffnen → <b>Tools › Developer tools › IPC Server</b> starten (Port 8080).</p>
+  </section>
+
+  <section>
+    <h2>2 · Product System auswählen</h2>
+    <div class="row">
+      <input id="search" type="text" placeholder="Suchen nach Name oder Ordner …" aria-label="Product System suchen">
+      <span id="count" class="count"></span>
+    </div>
+    <ul id="list" role="listbox" aria-label="Product Systems">
+      <li class="empty">Noch keine Verbindung.</li>
+    </ul>
+  </section>
+
+  <section id="psSection" class="ps-wrap">
+    <h2>3 · Parameter Sets</h2>
+    <p class="hint" style="margin:0 0 4px">Wähle die Parameter Sets, die im Report als Sheet&nbsp;4 erscheinen sollen.</p>
+    <div class="ps-actions">
+      <button id="psAll" type="button">Alle</button>
+      <button id="psNone" type="button">Keine</button>
+      <span id="psCount" class="count"></span>
+    </div>
+    <div id="psGrid" class="ps-grid"></div>
+  </section>
+
+  <section>
+    <h2 id="reportHeading">3 · Report erstellen</h2>
+    <div class="row">
+      <button id="run" class="primary" disabled>Excel-Report erstellen</button>
+      <label id="pickWrap" style="display:none"><input id="pick" type="checkbox" checked> Speicherort wählen</label>
+      <div id="progress" class="progress" aria-hidden="true"></div>
+    </div>
+    <div id="phase"></div>
+  </section>
+
+  <section id="result" aria-live="polite"></section>
+
+  <section>
+    <details>
+      <summary>Protokoll</summary>
+      <pre id="log"></pre>
+    </details>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+/* ================= IPC ================= */
+let IPC_URL = "http://localhost:8080";
+
+async function ipc(method, params) {
+  let res;
+  try {
+    res = await fetch(IPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+  } catch (e) {
+    throw new Error(`Keine Verbindung zu ${IPC_URL}. Läuft openLCA mit gestartetem IPC Server?`);
+  }
+  const j = await res.json();
+  if (j.error) {
+    const msg = j.error.message || JSON.stringify(j.error);
+    if (/Connection|\bcon\b.*null/i.test(msg)) throw new Error("openLCA antwortet, aber es ist keine Datenbank geöffnet.");
+    throw new Error("IPC-Fehler: " + msg);
+  }
+  return j.result;
+}
+
+function limiter(n) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= n || !queue.length) return;
+    active++;
+    const { fn, resolve, reject } = queue.shift();
+    fn().then(resolve, reject).finally(() => { active--; next(); });
+  };
+  return fn => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+}
+const limit = limiter(6);
+
+let processCache = new Map();
+let loadedCount = 0;
+
+function getProcess(id) {
+  if (!processCache.has(id)) {
+    const p = limit(() => ipc("data/get", { "@type": "Process", "@id": id }))
+      .then(r => { loadedCount++; updatePhase(); return r; });
+    p.catch(() => {});
+    processCache.set(id, p);
+  }
+  return processCache.get(id);
+}
+// Start fetching in parallel; results are awaited later in deterministic order.
+function warm(ids) { for (const id of ids) if (id) getProcess(id); }
+function clearCaches() { processCache = new Map(); loadedCount = 0; }
+
+/* ================= Report logic (mirrors generate_doc.py) ================= */
+const ECOINVENT_NAME = / \| .+ \| (Cutoff|APOS|Consequential|EN15804)/i;
+const ISIC_CATEGORY = /^[A-U]:/;
+function isCustom(name, category) {
+  return !(ECOINVENT_NAME.test(name || "") || ISIC_CATEGORY.test(category || ""));
+}
+
+const NO_META = { url: "", from: "", until: "" };
+async function ecoMeta(id) {
+  try {
+    const p = await getProcess(id);
+    let url = "";
+    for (const line of (p.description || "").split("\n")) {
+      const i = line.indexOf("ecoQuery:");
+      if (i >= 0) { url = line.slice(i + 9).trim(); break; }
+    }
+    const doc = p.processDocumentation || {};
+    return { url, from: doc.validFrom || "", until: doc.validUntil || "" };
+  } catch { return NO_META; }
+}
+
+async function processDq(id) {
+  if (!id) return ["", ""];
+  try {
+    const p = await getProcess(id);
+    return [(p.dqSystem && p.dqSystem.name) || "", p.dqEntry || ""];
+  } catch { return ["", ""]; }
+}
+
+const providerIds = proc => (proc.exchanges || []).map(e => e.defaultProvider && e.defaultProvider["@id"]).filter(Boolean);
+
+async function findMainProcesses(ps) {
+  const refId = (ps.refProcess || {})["@id"] || "";
+  const ids = [refId];
+  try {
+    const ref = await getProcess(refId);
+    const candidates = [];
+    for (const ex of ref.exchanges || []) {
+      const p = ex.defaultProvider;
+      if (p && isCustom(p.name, p.category) && !candidates.includes(p["@id"])) candidates.push(p["@id"]);
+    }
+    warm(candidates);
+    for (const id of candidates) {
+      try {
+        const sub = await getProcess(id);
+        // a custom process with significant sub-structure counts as main process
+        if ((sub.exchanges || []).filter(e => e.defaultProvider).length > 5 && !ids.includes(id)) ids.push(id);
+      } catch { /* skip */ }
+    }
+  } catch { /* ref process not readable */ }
+  const main = new Map();
+  for (const id of ids) {
+    try { main.set(id, (await getProcess(id)).name || "?"); } catch { /* skip */ }
+  }
+  return main;
+}
+
+const COLS_1 = ["Main Process", "Process DQ System", "Process DQ Entry", "Direction", "Flow Name", "Flow Type",
+  "Amount", "Formula", "Unit", "Provider Process", "Provider Location", "Provider Analysis Group", "Provider ID",
+  "Data Source", "URL", "Valid From", "Valid Until", "Is Quantitative Ref"];
+const COLS_2 = ["Custom Process", "Used In (Parent Process)", "Custom Process Analysis Group", "Custom Process Location",
+  "Custom Process DQ System", "Custom Process DQ Entry", "Custom Process ID", "Direction", "Flow Name", "Flow Type",
+  "Amount", "Unit", "Provider Process", "Provider Location", "Provider ID", "Data Source", "ecoinvent Category",
+  "URL", "Valid From", "Valid Until"];
+const COLS_3 = ["ecoinvent Process", "ecoinvent ID", "Location", "Category", "Used In (Custom Process)",
+  "Flow Name", "URL", "Valid From", "Valid Until"];
+
+function buildParameterSheet(selectedSets) {
+  if (!selectedSets.length) return null;
+  // Collect all parameter names (union across all selected sets)
+  const allNames = new Set();
+  for (const s of selectedSets)
+    for (const p of s.parameters || []) allNames.add(p.name);
+  const names = [...allNames].sort((a, b) => a.localeCompare(b, "de"));
+
+  // Build column headers: "Parameter", then each set name (baseline marked)
+  const cols = ["Parameter", ...selectedSets.map(s =>
+    s.name + (s.isBaseline ? " (Baseline)" : ""))];
+
+  // Build rows: one per parameter name, values from each set
+  const rows = names.map(name => {
+    const row = [name];
+    for (const s of selectedSets) {
+      const p = (s.parameters || []).find(x => x.name === name);
+      row.push(p !== undefined ? p.value : "");
+    }
+    return row;
+  });
+  return { name: "4_Parameter Sets", cols, rows };
+}
+
+async function buildReport(ps, main) {
+  // Analysis groups: direct assignments, inherited via parent processes
+  const direct = new Map();
+  for (const g of ps.analysisGroups || [])
+    for (const r of g.processes || []) direct.set(r["@id"], g.name || "");
+
+  setPhase("Analysiere Prozessstruktur …");
+  const parent = new Map();
+  const scanned = new Set();
+  const toScan = [...new Set([...main.keys(), ...direct.keys()])];
+  warm(toScan);
+  while (toScan.length) {
+    const pid = toScan.shift();
+    if (scanned.has(pid)) continue;
+    scanned.add(pid);
+    let proc;
+    try { proc = await getProcess(pid); } catch { continue; }
+    const next = [];
+    for (const ex of proc.exchanges || []) {
+      const p = ex.defaultProvider;
+      if (!p) continue;
+      const cid = p["@id"];
+      if (!parent.has(cid) && cid !== pid) parent.set(cid, pid);
+      if (isCustom(p.name, p.category) && !scanned.has(cid)) { toScan.push(cid); next.push(cid); }
+    }
+    warm(next);
+  }
+  const group = id => {
+    if (!id) return "";
+    if (direct.has(id)) return direct.get(id);
+    const seen = new Set();
+    let cur = id;
+    while (parent.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = parent.get(cur);
+      if (direct.has(cur)) return direct.get(cur);
+    }
+    return "";
+  };
+
+  const loc = new Map();
+  for (const r of ps.processes || []) if (r.location) loc.set(r["@id"], r.location);
+  log(`  Analysis Groups: ${(ps.analysisGroups || []).length}, direkte Zuordnungen: ${direct.size}`);
+  log(`  Prozesse mit Location: ${loc.size}`);
+
+  // ---- Sheet 1 ----
+  setPhase("Blatt 1: Hauptprozesse …");
+  const sheet1 = [];
+  for (const [pid, pname] of main) {
+    const proc = await getProcess(pid);
+    warm(providerIds(proc));
+    for (const ex of proc.exchanges || []) {
+      const p = ex.defaultProvider;
+      const provId = p ? p["@id"] : "";
+      const custom = p ? isCustom(p.name, p.category) : false;
+      const [dqSystem, dqEntry] = await processDq(provId);
+      const m = p && !custom ? await ecoMeta(provId) : NO_META;
+      sheet1.push([
+        pname, dqSystem, dqEntry, ex.isInput ? "Input" : "Output",
+        (ex.flow || {}).name || "", (ex.flow || {}).flowType || "", ex.amount ?? 0,
+        ex.amountFormula || "", (ex.unit || {}).name || "",
+        p ? p.name : "", loc.get(provId) || "", group(provId), provId,
+        p ? (custom ? "Custom" : "ecoinvent") : "", m.url, m.from, m.until,
+        ex.isQuantitativeReference ? "Yes" : "",
+      ]);
+    }
+  }
+
+  // ---- Sheet 2: custom sub-processes at any depth ----
+  setPhase("Blatt 2: Sub-Prozesse …");
+  const customParents = new Map();
+  const queue = [...main.keys()];
+  const visited = new Set(queue);
+  while (queue.length) {
+    const pid = queue.shift();
+    let proc;
+    try { proc = await getProcess(pid); } catch { continue; }
+    const pname = proc.name || "?";
+    const next = [];
+    for (const ex of proc.exchanges || []) {
+      const p = ex.defaultProvider;
+      if (!p || main.has(p["@id"]) || !isCustom(p.name, p.category)) continue;
+      const id = p["@id"];
+      if (!customParents.has(id)) customParents.set(id, []);
+      const parents = customParents.get(id);
+      if (!parents.includes(pname)) parents.push(pname);
+      if (!visited.has(id)) { visited.add(id); queue.push(id); next.push(id); }
+    }
+    warm(next);
+  }
+
+  const sheet2 = [];
+  const subRows = [];
+  for (const [cid, parents] of customParents) {
+    let cp;
+    try { cp = await getProcess(cid); } catch { continue; }
+    const cname = cp.name || "?";
+    log(`  ${cname}`);
+    warm(providerIds(cp));
+    for (const ex of cp.exchanges || []) {
+      const sp = ex.defaultProvider;
+      if (!sp) continue;
+      const spId = sp["@id"];
+      const eco = !isCustom(sp.name, sp.category);
+      const m = eco ? await ecoMeta(spId) : NO_META;
+      const row = {
+        custom: cname, providerName: sp.name, providerId: spId, providerLoc: loc.get(spId) || "",
+        eco, category: eco ? (sp.category || "") : "", flow: (ex.flow || {}).name || "", meta: m,
+      };
+      subRows.push(row);
+      sheet2.push([
+        cname, parents.join("; "), group(cid), loc.get(cid) || "",
+        (cp.dqSystem && cp.dqSystem.name) || "", cp.dqEntry || "", cid,
+        ex.isInput ? "Input" : "Output", row.flow, (ex.flow || {}).flowType || "",
+        ex.amount ?? 0, (ex.unit || {}).name || "",
+        sp.name, row.providerLoc, spId, eco ? "ecoinvent" : "Custom", row.category,
+        m.url, m.from, m.until,
+      ]);
+    }
+  }
+
+  // ---- Sheet 3: unique ecoinvent datasets ----
+  setPhase("Blatt 3: ecoinvent-Datensätze …");
+  const eco = new Map();
+  const addEco = (id, name, location, category, usedIn, flow, m) => {
+    if (!eco.has(id)) eco.set(id, { name, id, location, category, usedIn: [usedIn], flow, m });
+    else if (!eco.get(id).usedIn.includes(usedIn)) eco.get(id).usedIn.push(usedIn);
+  };
+  for (const [pid, pname] of main) {
+    const proc = await getProcess(pid);
+    for (const ex of proc.exchanges || []) {
+      const p = ex.defaultProvider;
+      if (!p || isCustom(p.name, p.category)) continue;
+      addEco(p["@id"], p.name, loc.get(p["@id"]) || "", p.category || "", pname,
+        (ex.flow || {}).name || "", await ecoMeta(p["@id"]));
+    }
+  }
+  for (const r of subRows)
+    if (r.eco) addEco(r.providerId, r.providerName, r.providerLoc, r.category, r.custom, r.flow, r.meta);
+  const sheet3 = [...eco.values()].map(e =>
+    [e.name, e.id, e.location, e.category, e.usedIn.join("; "), e.flow, e.m.url, e.m.from, e.m.until]);
+
+  const groups = new Set();
+  for (const id of [...main.keys(), ...customParents.keys()]) { const g = group(id); if (g) groups.add(g); }
+
+  // Build parameter sets sheet from selected sets
+  const selectedSets = [...psChecked].sort((a, b) => a - b).map(i => parameterSets[i]).filter(Boolean);
+  const psSheet = buildParameterSheet(selectedSets);
+
+  const sheets = [
+    { name: "1_Main Processes", cols: COLS_1, rows: sheet1 },
+    { name: "2_Sub-Process Details", cols: COLS_2, rows: sheet2 },
+    { name: "3_ecoinvent Datasets", cols: COLS_3, rows: sheet3 },
+  ];
+  if (psSheet) sheets.push(psSheet);
+
+  return {
+    sheets,
+    summary: {
+      mainProcesses: [...main.values()],
+      customCount: customParents.size,
+      ecoCount: sheet3.length,
+      rows: [sheet1.length, sheet2.length, sheet3.length],
+      groups: [...groups].sort(),
+      locations: [...new Set(sheet3.map(r => r[2]).filter(Boolean))].sort(),
+      parameterSetsIncluded: selectedSets.length,
+    },
+  };
+}
+
+/* ================= Minimal XLSX writer (stored ZIP) ================= */
+const enc = new TextEncoder();
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function zipBlob(files, mime) {
+  const d = new Date();
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  const parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const data = typeof f.data === "string" ? enc.encode(f.data) : f.data;
+    const crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+    lh.setUint16(8, 0, true); lh.setUint16(10, time, true); lh.setUint16(12, date, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+    ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true); ch.setUint16(12, time, true);
+    ch.setUint16(14, date, true); ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true);
+    ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((a, b) => a + b.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: mime });
+}
+
+const xmlEsc = s => String(s)
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const colName = i => { let s = ""; i++; while (i) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+const XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+const NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+function cellXml(ref, v, style) {
+  const s = style ? ` s="${style}"` : "";
+  if (v === null || v === undefined || v === "") return "";
+  if (typeof v === "number" && Number.isFinite(v)) return `<c r="${ref}"${s}><v>${v}</v></c>`;
+  return `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${xmlEsc(v)}</t></is></c>`;
+}
+
+function sheetXml(sheet) {
+  const { cols, rows } = sheet;
+  const last = colName(cols.length - 1);
+  const lastRow = rows.length + 1;
+  // column width = longest value + 2, capped at 60 (as in generate_doc.py)
+  const widths = cols.map((h, i) => Math.min(Math.max(String(h).length,
+    ...rows.map(r => (r[i] === null || r[i] === undefined ? 0 : String(r[i]).length))) + 2, 60));
+  const out = [XML_HEAD, `<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}">`,
+    `<dimension ref="A1:${last}${lastRow}"/>`,
+    '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>',
+    "<cols>", ...widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`), "</cols>",
+    "<sheetData>",
+    `<row r="1">${cols.map((h, i) => cellXml(colName(i) + "1", h, 1)).join("")}</row>`];
+  rows.forEach((r, ri) => {
+    const rn = ri + 2;
+    out.push(`<row r="${rn}">${r.map((v, i) => cellXml(colName(i) + rn, v)).join("")}</row>`);
+  });
+  out.push("</sheetData>", `<autoFilter ref="A1:${last}${lastRow}"/>`, "</worksheet>");
+  return out.join("");
+}
+
+function buildXlsx(sheets) {
+  const files = [];
+  files.push({ name: "[Content_Types].xml", data: XML_HEAD +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") +
+    "</Types>" });
+  files.push({ name: "_rels/.rels", data: XML_HEAD +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    "</Relationships>" });
+  files.push({ name: "xl/workbook.xml", data: XML_HEAD +
+    `<workbook xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><bookViews><workbookView/></bookViews><sheets>` +
+    sheets.map((s, i) => `<sheet name="${xmlEsc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("") +
+    "</sheets><definedNames>" +
+    sheets.map((s, i) => `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${xmlEsc(s.name)}'!$A$1:$${colName(s.cols.length - 1)}$${s.rows.length + 1}</definedName>`).join("") +
+    "</definedNames></workbook>" });
+  files.push({ name: "xl/_rels/workbook.xml.rels", data: XML_HEAD +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("") +
+    `<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+    "</Relationships>" });
+  files.push({ name: "xl/styles.xml", data: XML_HEAD +
+    `<styleSheet xmlns="${NS_MAIN}">` +
+    '<fonts count="2"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font>' +
+    '<font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>' +
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>' +
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+    "</styleSheet>" });
+  sheets.forEach((s, i) => files.push({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheetXml(s) }));
+  return zipBlob(files, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
+/* ================= UI ================= */
+const $ = id => document.getElementById(id);
+let systems = [];
+let selected = null;
+let busy = false;
+let phaseText = "";
+let parameterSets = [];   // current PS's parameterSets (raw from API)
+let psChecked = new Set(); // indices of checked parameter sets
+let cachedPsData = null;   // cached full product system data (avoid double fetch)
+let cachedPsId = null;
+
+function log(msg) { const el = $("log"); el.textContent += msg + "\n"; el.scrollTop = el.scrollHeight; }
+function setPhase(t) { phaseText = t; log(t); updatePhase(); }
+function updatePhase() { $("phase").textContent = busy ? `${phaseText}  (${loadedCount} Prozesse geladen)` : ""; }
+function setBusy(b) {
+  busy = b;
+  $("progress").classList.toggle("on", b);
+  $("connect").disabled = b;
+  $("run").disabled = b || !selected;
+  updatePhase();
+}
+function setStatus(text, cls) { const el = $("connStatus"); el.textContent = text; el.className = "status " + (cls || ""); }
+
+function store(key, val) { try { localStorage.setItem(key, val); } catch { /* ignore */ } }
+function recall(key) { try { return localStorage.getItem(key); } catch { return null; } }
+
+function applyServer() {
+  const host = $("host").value.trim() || "localhost";
+  const port = parseInt($("port").value, 10);
+  if (!(port > 0 && port < 65536)) throw new Error("Ungültiger Port.");
+  IPC_URL = `http://${host}:${port}`;
+  store("olca.host", host); store("olca.port", String(port));
+}
+
+function updateSectionNumbers() {
+  const hasPS = parameterSets.length > 0;
+  $("reportHeading").textContent = hasPS ? "4 · Report erstellen" : "3 · Report erstellen";
+}
+
+async function loadParameterSets() {
+  parameterSets = [];
+  psChecked.clear();
+  const sec = $("psSection");
+  const grid = $("psGrid");
+  grid.innerHTML = "";
+  sec.classList.remove("on");
+  updateSectionNumbers();
+  if (!selected) return;
+
+  try {
+    const psId = selected["@id"];
+    if (cachedPsId !== psId) {
+      cachedPsData = await ipc("data/get", { "@type": "ProductSystem", "@id": psId });
+      cachedPsId = psId;
+    }
+    parameterSets = cachedPsData.parameterSets || [];
+  } catch { parameterSets = []; cachedPsData = null; cachedPsId = null; }
+
+  if (!parameterSets.length) { updateSectionNumbers(); return; }
+
+  sec.classList.add("on");
+  parameterSets.forEach((s, i) => {
+    psChecked.add(i);
+    const lbl = document.createElement("label");
+    if (s.isBaseline) lbl.classList.add("baseline");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = true; cb.dataset.idx = i;
+    cb.addEventListener("change", () => {
+      if (cb.checked) psChecked.add(i); else psChecked.delete(i);
+      updatePsCount();
+    });
+    const txt = document.createElement("span");
+    txt.textContent = s.name || `Set ${i + 1}`;
+    lbl.append(cb, txt);
+    if (s.isBaseline) {
+      const badge = document.createElement("span");
+      badge.className = "badge"; badge.textContent = "Baseline";
+      lbl.appendChild(badge);
+    }
+    grid.appendChild(lbl);
+  });
+  updatePsCount();
+  updateSectionNumbers();
+}
+
+function updatePsCount() {
+  $("psCount").textContent = `${psChecked.size} von ${parameterSets.length} ausgewählt`;
+}
+
+function psSetAll(checked) {
+  parameterSets.forEach((_, i) => { if (checked) psChecked.add(i); else psChecked.delete(i); });
+  $("psGrid").querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = checked; });
+  updatePsCount();
+}
+
+async function connect() {
+  if (busy) return;
+  try { applyServer(); } catch (e) { setStatus(e.message, "err"); return; }
+  setStatus("Verbinde …");
+  setBusy(true);
+  try {
+    const list = await ipc("data/get/descriptors", { "@type": "ProductSystem" });
+    systems = list.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+    setStatus(`Verbunden · ${systems.length} Product Systems`, "ok");
+    log(`Verbunden mit ${IPC_URL}: ${systems.length} Product Systems`);
+    if (selected && !systems.some(s => s["@id"] === selected["@id"])) { selected = null; cachedPsData = null; cachedPsId = null; }
+  } catch (e) {
+    systems = [];
+    selected = null;
+    setStatus(e.message, "err");
+    log("Fehler: " + e.message);
+  }
+  setBusy(false);
+  renderList();
+}
+
+function renderList() {
+  const term = $("search").value.trim().toLowerCase();
+  const visible = systems.filter(s => !term ||
+    (s.name || "").toLowerCase().includes(term) || (s.category || "").toLowerCase().includes(term));
+  const ul = $("list");
+  ul.innerHTML = "";
+  if (!visible.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = systems.length ? "Keine Treffer." : "Keine Product Systems geladen.";
+    ul.appendChild(li);
+  }
+  if (visible.length === 1 && !selected) selected = visible[0];
+  for (const s of visible) {
+    const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.tabIndex = 0;
+    const isSel = selected && selected["@id"] === s["@id"];
+    li.className = isSel ? "sel" : "";
+    li.setAttribute("aria-selected", isSel ? "true" : "false");
+    const name = document.createElement("span");
+    name.textContent = s.name || "?";
+    const cat = document.createElement("span");
+    cat.className = "cat";
+    cat.textContent = s.category || "";
+    li.append(name, cat);
+    li.addEventListener("click", () => { selected = s; renderList(); loadParameterSets(); });
+    li.addEventListener("dblclick", () => { selected = s; renderList(); loadParameterSets().then(runReport); });
+    li.addEventListener("keydown", e => { if (e.key === "Enter") { selected = s; renderList(); loadParameterSets().then(runReport); } });
+    ul.appendChild(li);
+  }
+  $("count").textContent = systems.length ? `${visible.length} von ${systems.length}` : "";
+  $("run").disabled = busy || !selected;
+}
+
+const safeName = n => n.replace(/[^\p{L}\p{N} ._()-]/gu, "_").trim().replace(/ /g, "_");
+const stamp = () => {
+  const d = new Date(), p = x => String(x).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+};
+const canPick = typeof window.showSaveFilePicker === "function";
+
+async function runReport() {
+  if (busy || !selected) return;
+  const ps = selected;
+  const fileName = `openLCA_Doc_${safeName(ps.name || "report")}_${stamp()}.xlsx`;
+
+  // The save dialog must open directly on the click, before the long-running work.
+  let handle = null;
+  if (canPick && $("pick").checked) {
+    try {
+      handle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: "Excel-Arbeitsmappe", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
+      });
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      handle = null;
+    }
+  }
+
+  const result = $("result");
+  result.className = "";
+  clearCaches();
+  setBusy(true);
+  const t0 = performance.now();
+  log(`\n=== ${ps.name} ===`);
+  try {
+    applyServer();
+    setPhase("Lade Product System …");
+    const data = (cachedPsId === ps["@id"] && cachedPsData)
+      ? cachedPsData
+      : await ipc("data/get", { "@type": "ProductSystem", "@id": ps["@id"] });
+    cachedPsData = data; cachedPsId = ps["@id"];
+    setPhase("Ermittle Hauptprozesse …");
+    const main = await findMainProcesses(data);
+    if (!main.size) throw new Error("Der Referenzprozess des Product Systems konnte nicht gelesen werden.");
+    log("  Hauptprozesse: " + [...main.values()].join(", "));
+    const report = await buildReport(data, main);
+    setPhase("Schreibe Excel-Datei …");
+    const blob = buildXlsx(report.sheets);
+    let savedAs;
+    if (handle) {
+      const w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      savedAs = handle.name;
+    } else {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      savedAs = fileName + " (Download-Ordner)";
+    }
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    log(`Fertig in ${secs} s: ${savedAs}`);
+    showResult(ps.name, report.summary, savedAs, secs);
+  } catch (e) {
+    log("Fehler: " + (e.stack || e.message));
+    result.className = "on error";
+    result.innerHTML = "";
+    const h = document.createElement("h2");
+    h.textContent = "Report konnte nicht erstellt werden";
+    const p = document.createElement("p");
+    p.textContent = /Excel|writable|NoModification|InvalidState/i.test(e.name + e.message)
+      ? "Die Datei kann nicht geschrieben werden – ist sie noch in Excel geöffnet?"
+      : e.message;
+    result.append(h, p);
+  }
+  setBusy(false);
+}
+
+function showResult(psName, s, savedAs, secs) {
+  const result = $("result");
+  result.className = "on";
+  const psInfo = s.parameterSetsIncluded
+    ? `<dt>Parameter Sets</dt><dd>${s.parameterSetsIncluded} im Blatt 4</dd>` : "";
+  result.innerHTML = `
+    <h2>Report erstellt</h2>
+    <div class="stats">
+      <div class="stat"><b></b><span>Hauptprozesse</span></div>
+      <div class="stat"><b></b><span>Custom Sub-Prozesse</span></div>
+      <div class="stat"><b></b><span>ecoinvent-Datensätze</span></div>
+      <div class="stat"><b></b><span>Sekunden</span></div>
+    </div>
+    <dl>
+      <dt>Product System</dt><dd></dd>
+      <dt>Datei</dt><dd></dd>
+      <dt>Hauptprozesse</dt><dd></dd>
+      <dt>Zeilen (Blatt 1/2/3)</dt><dd></dd>
+      <dt>Analysis Groups</dt><dd></dd>
+      <dt>Locations</dt><dd></dd>
+      ${psInfo}
+    </dl>`;
+  const b = result.querySelectorAll(".stat b");
+  [s.mainProcesses.length, s.customCount, s.ecoCount, secs].forEach((v, i) => { b[i].textContent = v; });
+  const dd = result.querySelectorAll("dd");
+  [psName, savedAs, s.mainProcesses.join(" · "), s.rows.join(" / "),
+    s.groups.join(", ") || "–", s.locations.join(", ") || "–"].forEach((v, i) => { dd[i].textContent = v; });
+}
+
+/* ================= init ================= */
+$("host").value = recall("olca.host") || "localhost";
+$("port").value = recall("olca.port") || "8080";
+if (canPick) $("pickWrap").style.display = "";
+$("connect").addEventListener("click", connect);
+$("run").addEventListener("click", runReport);
+$("search").addEventListener("input", renderList);
+$("psAll").addEventListener("click", () => psSetAll(true));
+$("psNone").addEventListener("click", () => psSetAll(false));
+for (const id of ["host", "port"]) $(id).addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
+connect();
+</script>
+</body>
+</html>
